@@ -1,0 +1,18 @@
+efie.cpp
+// 修改 plane_wave_e 函数，返回完整的复数电场矢量
+Vertex EFIE::plane_wave_e_vector(const Vertex& r, const Vertex& k_inc,
+                                 const Vertex& E0_pol) const {
+    double phase = k_inc.x * r.x + k_inc.y * r.y + k_inc.z * r.z;
+    Complex exp_phase = std::exp(Complex(0, -phase));
+    // 返回一个 Vertex，其中每个分量都是复数
+    return Vertex(E0_pol.x * exp_phase,
+                  E0_pol.y * exp_phase,
+                  E0_pol.z * exp_phase);
+}
+
+// 在 fill_vector 中正确计算点积
+Vertex E_inc = plane_wave_e_vector(r, k_inc, E0_pol);
+// 注意：这里需要的是复数点积，即 Ex*fx + Ey*fy + Ez*fz
+Complex E_dot_f = E_inc.x * Complex(fx, 0) + 
+                  E_inc.y * Complex(fy, 0) + 
+                  E_inc.z * Complex(fz, 0);

@@ -1,0 +1,221 @@
+● 方案已完成。核心思路是：
+
+  - 单层 FMM，使用**对角形式（平面波展开）**将 EFIE 核分解为 4 个标量通道
+  - 近场用精确双重积分（复用现有 compute_interaction），远场用盒子级辐射方向图聚合/转移/解聚
+  - 通过 std::function 将 FMM 的 matvec 注入 BiCGSTAB 求解器，原有稠密路径保持不变
+  - 盒子大小 ~0.3λ，整个球大约被分为几十个盒子
+ 
+
+FMM 加速方案实施计划
+
+ 背景
+
+ 当前 MoM+EFIE 代码使用 O(N²) 稠密阻抗矩阵和 O(N²) 矩阵-向量积。本项目将添加单层快速多极子 (Single-Level FMM)
+ 加速，使用平面波展开（diagonal form），将远场相互作用从 O(N²) 降为 O(N^1.5)。
+
+ 核心算法
+
+ EFIE 核的 4 通道分解
+
+ EFIE 矩阵元：Z_ij = jkη ∫∫ [f_i·f_j - k⁻²(∇·f_i)(∇·f_j)] G(R) dS' dS
+
+ 对远场，做中心点近似，G(R) 用平面波展开（对角形式），分解为 4 个独立标量通道：
+ - 源权重 s_j：(f_jx, f_jy, f_jz, div_j/k)
+ - 测试权重 t_i：(f_ix, f_iy, f_iz, -div_i/k)
+
+ 每次迭代的 FMM 矩阵-向量积
+
+ 1. 聚合 (Aggregation)：每个盒子对所有 K 个方向求和源贡献
+ 2. 转移 (Translation)：非空盒子对之间施加对角转移算子 T_L
+ 3. 解聚 (Disaggregation)：在每个测试函数处汇总各方向的入射场
+ 4. 加近场：CSR 稀疏矩阵-向量积
+
+ 转移算子
+
+ T_L(kR, cosθ) = Σ_{l=0}^{L} (-j)^l (2l+1) h_l^{(2)}(kR) P_l(cosθ)
+
+ 通过球 Hankel 函数和 Legendre 多项式的递推关系计算。
+
+ 新增文件
+
+ 1. vec3_ops.h — 向量运算工具（纯 inline）
+
+ Vertex 的运算符重载和工具函数：+, -, *scalar, dot, cross, norm, normalize
+
+ 2. fmm_translator.h / fmm_translator.cpp — 转移算子 & 角谱积分
+
+ - PWSDirection 结构体（k̂ 方向 + 权重）
+ - Translator 类：
+   - generate_quadrature(L) — Gauss-Legendre (cosθ) × 均匀 (φ) 球面采样
+   - compute(kR, cos_theta, L) — 计算 T_L
+   - hankel_h2() / legendre_p() — 递推实现
+
+ 3. fmm.h / fmm.cpp — FMM 核心
+
+ - FMMBox 结构体（网格索引、中心、基函数列表、近场/远场盒子列表）
+ - FMM 类：
+   - build_boxes() — 构建 3D 规则网格，分配基函数到盒子
+   - precompute_patterns() — 为所有基函数预计算 4 通道辐射/接收方向图
+   - fill_nearfield(efie) — 用精确 EFIE 双重积分填充 CSR 近场矩阵
+   - matvec(x, y) — FMM 加速的矩阵-向量积
+   - get_matvec_functor() — 返回 std::function<void(vec,vec)> 供求解器使用
+
+ 关键设计决策：
+ - 盒子大小 = 0.3λ（可配置）
+ - 截断数 L：L ≈ kD/2 + 1.8 (kD/2)^{1/3}，D/2 为盒子半宽
+ - 近场：±1 盒子范围内的所有盒子对（最多 27 邻域）
+ - 辐射方向图用中心点近似（三角形重心处求 RWG 值 × 面积）
+ - 基函数"中心"取其两个三角形重心的平均值
+ - 转移矩阵在初始化时预计算（存入扁平数组），迭代时只做乘加
+
+ 修改文件
+
+ 4. efie.h / efie.cpp
+
+ - compute_interaction(int i, int j) 从 private 改为 public const
+ - 使 FMM 的近场填充能调用精确双重积分
+
+ 5. cg_solver.h / cg_solver.cpp
+
+ - 新增 solve_bicgstab_functor(matvec_functor, b, x, tol, max_iter) 静态方法
+ - 用 std::function<void(const vector&, vector&)> 替代稠密 Z 矩阵
+ - 原有 solve_bicgstab(Z, b, x) 保持不变，便于对比
+
+ 6. main.cpp
+
+ - 添加 use_fmm 开关
+ - FMM 路径：build_boxes() → precompute_patterns() → fill_nearfield() → solve_bicgstab_functor()
+ - 可选：同时用稠密法求解并对比结果
+
+ 7. Makefile
+
+ - SRCS 添加 fmm.cpp fmm_translator.cpp
+
+
+● Entered plan mode
+  Claude is now exploring and designing an implementation approach.
+
+● 我已经完整阅读了项目所有源码，对现有架构有充分理解。让我直接进入设计阶段。
+
+● Plan(FMM implementation design)
+  ⎿  Done (21 tool uses · 53.4k tokens · 7m 2s)
+  (ctrl+o to expand)
+
+● 方案设计非常详尽。让我将最终计划写入文件。
+
+● Updated plan
+  ⎿  /plan to preview
+
+● 方案已完成。核心思路是：
+
+  - 单层 FMM，使用**对角形式（平面波展开）**将 EFIE 核分解为 4 个标量通道
+  - 近场用精确双重积分（复用现有 compute_interaction），远场用盒子级辐射方向图聚合/转移/解聚
+  - 通过 std::function 将 FMM 的 matvec 注入 BiCGSTAB 求解器，原有稠密路径保持不变
+  - 盒子大小 ~0.3λ，整个球大约被分为几十个盒子
+
+● User approved Claude's plan
+  ⎿  Plan saved to: C:\Users\陈可怡\.claude\plans\witty-wishing-wilkes.md · /plan to edit
+     FMM 加速方案实施计划
+
+     背景
+
+     当前 MoM+EFIE 代码使用 O(N²) 稠密阻抗矩阵和 O(N²) 矩阵-向量积。本项目将添加单层快速多极子 (Single-Level FMM)
+     加速，使用平面波展开（diagonal form），将远场相互作用从 O(N²) 降为 O(N^1.5)。
+
+     核心算法
+
+     EFIE 核的 4 通道分解
+
+     EFIE 矩阵元：Z_ij = jkη ∫∫ [f_i·f_j - k⁻²(∇·f_i)(∇·f_j)] G(R) dS' dS
+
+     对远场，做中心点近似，G(R) 用平面波展开（对角形式），分解为 4 个独立标量通道：
+     - 源权重 s_j：(f_jx, f_jy, f_jz, div_j/k)
+     - 测试权重 t_i：(f_ix, f_iy, f_iz, -div_i/k)
+
+     每次迭代的 FMM 矩阵-向量积
+
+     1. 聚合 (Aggregation)：每个盒子对所有 K 个方向求和源贡献
+     2. 转移 (Translation)：非空盒子对之间施加对角转移算子 T_L
+     3. 解聚 (Disaggregation)：在每个测试函数处汇总各方向的入射场
+     4. 加近场：CSR 稀疏矩阵-向量积
+
+     转移算子
+
+     T_L(kR, cosθ) = Σ_{l=0}^{L} (-j)^l (2l+1) h_l^{(2)}(kR) P_l(cosθ)
+
+     通过球 Hankel 函数和 Legendre 多项式的递推关系计算。
+
+     新增文件
+
+     1. vec3_ops.h — 向量运算工具（纯 inline）
+
+     Vertex 的运算符重载和工具函数：+, -, *scalar, dot, cross, norm, normalize
+
+     2. fmm_translator.h / fmm_translator.cpp — 转移算子 & 角谱积分
+
+     - PWSDirection 结构体（k̂ 方向 + 权重）
+     - Translator 类：
+       - generate_quadrature(L) — Gauss-Legendre (cosθ) × 均匀 (φ) 球面采样
+       - compute(kR, cos_theta, L) — 计算 T_L
+       - hankel_h2() / legendre_p() — 递推实现
+
+     3. fmm.h / fmm.cpp — FMM 核心
+
+     - FMMBox 结构体（网格索引、中心、基函数列表、近场/远场盒子列表）
+     - FMM 类：
+       - build_boxes() — 构建 3D 规则网格，分配基函数到盒子
+       - precompute_patterns() — 为所有基函数预计算 4 通道辐射/接收方向图
+       - fill_nearfield(efie) — 用精确 EFIE 双重积分填充 CSR 近场矩阵
+       - matvec(x, y) — FMM 加速的矩阵-向量积
+       - get_matvec_functor() — 返回 std::function<void(vec,vec)> 供求解器使用
+
+     关键设计决策：
+     - 盒子大小 = 0.3λ（可配置）
+     - 截断数 L：L ≈ kD/2 + 1.8 (kD/2)^{1/3}，D/2 为盒子半宽
+     - 近场：±1 盒子范围内的所有盒子对（最多 27 邻域）
+     - 辐射方向图用中心点近似（三角形重心处求 RWG 值 × 面积）
+     - 基函数"中心"取其两个三角形重心的平均值
+     - 转移矩阵在初始化时预计算（存入扁平数组），迭代时只做乘加
+
+     修改文件
+
+     4. efie.h / efie.cpp
+
+     - compute_interaction(int i, int j) 从 private 改为 public const
+     - 使 FMM 的近场填充能调用精确双重积分
+
+     5. cg_solver.h / cg_solver.cpp
+
+     - 新增 solve_bicgstab_functor(matvec_functor, b, x, tol, max_iter) 静态方法
+     - 用 std::function<void(const vector&, vector&)> 替代稠密 Z 矩阵
+     - 原有 solve_bicgstab(Z, b, x) 保持不变，便于对比
+
+     6. main.cpp
+
+     - 添加 use_fmm 开关
+     - FMM 路径：build_boxes() → precompute_patterns() → fill_nearfield() → solve_bicgstab_functor()
+     - 可选：同时用稠密法求解并对比结果
+
+     7. Makefile
+
+     - SRCS 添加 fmm.cpp fmm_translator.cpp
+
+     实施顺序
+
+     1. vec3_ops.h — 向量工具
+     2. fmm_translator.h/cpp — 转移算子 + 角谱积分
+     3. fmm.h/cpp — 盒子构建 + 近场/远场列表
+     4. fmm.h/cpp — 辐射方向图预计算
+     5. efie.h/cpp — 公开 compute_interaction
+     6. fmm.h/cpp — 近场 CSR 矩阵填充
+     7. fmm.h/cpp — FMM matvec
+     8. cg_solver.h/cpp — functor 版 BiCGSTAB
+     9. main.cpp + Makefile — 集成
+
+     验证策略
+
+     1. 角谱积分归一化：Σ w_p = 4π（单位球面积分）
+     2. 近场矩阵精度：Z_near[i][j] 与稠密 Z[i][j] 逐元素一致
+     3. FMM matvec 精度：对 refinement=0 (~30 未知量) 随机向量 x，||y_fmm - y_dense|| / ||y_dense|| < 1%
+     4. 求解结果：FMM 与稠密法的电流系数 I 相对差 < 1%
+     5. RCS 曲线：FMM 与稠密法 RCS(dBsm) 在采样角度上差异 < 0.5 dB
