@@ -347,8 +347,7 @@ void EFIE::fill_vector(const Vertex& k_inc, const Vertex& E0_pol,
                 double fy = coeff * (r.y - e.apex1.y);
                 double fz = coeff * (r.z - e.apex1.z);
 
-                // E_inc(r) 的 x 分量与 f 的点积
-                // E0_pol 定义为 {E0x, E0y, E0z}
+                // E0_pol 与 f(r) 的点积 (三分量)
                 double phase = k_inc.x*r.x + k_inc.y*r.y + k_inc.z*r.z;
                 Complex exp_phase = std::exp(Complex(0, -phase));
                 double E_dot_f = E0_pol.x*fx + E0_pol.y*fy + E0_pol.z*fz;

@@ -6,11 +6,11 @@
 #include "efie.h"
 #include "cg_solver.h"
 #include "farfield.h"
-#include "fmm.h"
+#include "mlfma.h"
 
 int main() {
     system("chcp 65001 > nul");  // 切换终端到 UTF-8，避免中文乱码
-    std::cout << "=== 金属小球 RCS 计算（矩量法 + RWG + FMM）===\n";
+    std::cout << "=== 金属小球 RCS 计算（矩量法 + RWG + MLFMA）===\n";
 
     // ---- 参数设置 ----
     double radius = 0.5;          // 球半径 0.5 m
@@ -20,9 +20,11 @@ int main() {
 
     int refinement = 2;           // 剖分细化次数（2次后约320个三角形）
     int n_theta = 5;              // RCS 计算的 θ 采样点数（0~180°）
-    bool use_fmm = true;          // 使用 FMM 加速
-    double fmm_box = 0.3 * lambda;// FMM 盒子尺寸
+    bool use_mlfma = true;        // 使用 MLFMA 加速
+    double mlfma_box = 0.3 * lambda; // MLFMA 最细层盒子尺寸
     bool run_dense_compare = false;// 同时跑稠密法对比 (耗时较长)
+    std::string solver_type = "gmres";  // 求解器: "bicgstab" | "gmres"
+    int gmres_restart = 30;       // GMRES 重启维度
 
     std::cout << "频率: " << freq/1e6 << " MHz\n";
     std::cout << "波长: " << lambda << " m\n";
@@ -53,22 +55,28 @@ int main() {
     // 5. 求解 Z I = b
     std::vector<Complex> I;
 
-    // FMM 对象 (作用域需覆盖对比代码)
-    FMM fmm(mesh, rwg, k0, fmm_box);
+    // MLFMA 对象
+    MLFMA mlfma(mesh, rwg, k0, mlfma_box);
 
-    if (use_fmm) {
-        // ---- FMM 加速路径 ----
-        std::cout << "\n--- FMM Setup ---\n";
-        fmm.build_boxes();
-        fmm.precompute_patterns();
-        fmm.fill_nearfield(efie);
-        fmm.print_stats();
+    if (use_mlfma) {
+        // ---- MLFMA 加速路径 ----
+        std::cout << "\n--- MLFMA Setup ---\n";
+        mlfma.build();
+        mlfma.precompute();
+        mlfma.fill_nearfield(efie);
+        mlfma.print_stats();
 
-        std::cout << "\n--- FMM-BiCGSTAB Solve ---\n";
-        auto mv = fmm.get_matvec_functor();
-        bool converged = CGSolver::solve_bicgstab_functor(mv, b, I, 1e-6, 1000);
+        std::cout << "\n--- MLFMA-" << (solver_type == "gmres" ? "GMRES" : "BiCGSTAB")
+                  << " Solve ---\n";
+        auto mv = mlfma.get_matvec_functor();
+        bool converged;
+        if (solver_type == "gmres") {
+            converged = CGSolver::solve_gmres_functor(mv, b, I, 1e-6, 1000, gmres_restart);
+        } else {
+            converged = CGSolver::solve_bicgstab_functor(mv, b, I, 1e-6, 1000);
+        }
         if (!converged) {
-            std::cout << "警告: FMM 迭代未收敛\n";
+            std::cout << "警告: MLFMA 迭代未收敛\n";
         }
     } else {
         // ---- 稠密矩阵路径 ----
@@ -96,7 +104,7 @@ int main() {
     }
 
     // 可选: 稠密法对比
-    if (use_fmm && run_dense_compare) {
+    if (use_mlfma && run_dense_compare) {
         std::cout << "\n--- 稠密法对比 ---\n";
         std::vector<std::vector<Complex>> Z_dense;
         efie.fill_matrix(Z_dense);
@@ -112,28 +120,28 @@ int main() {
             dense_norm += std::norm(I_dense[i]);
         }
         double rel_err = std::sqrt(diff_norm / std::max(dense_norm, 1e-30));
-        std::cout << "电流相对误差 ||I_fmm - I_dense|| / ||I_dense|| = "
+        std::cout << "电流相对误差 ||I_mlfma - I_dense|| / ||I_dense|| = "
                   << rel_err << "\n";
 
-        // 直接验证 matvec: 用相同的 x=I_fmm, 比较 y=Z*x
-        std::vector<Complex> y_fmm;
-        fmm.matvec(I, y_fmm);
+        // 直接验证 matvec: 用相同的 x=I_mlfma, 比较 y=Z*x
+        std::vector<Complex> y_mlfma;
+        mlfma.matvec(I, y_mlfma);
         std::vector<Complex> y_dense(I.size(), Complex(0,0));
         for (int i = 0; i < (int)I.size(); i++)
             for (int j = 0; j < (int)I.size(); j++)
                 y_dense[i] += Z_dense[i][j] * I[j];
         double mv_diff = 0, mv_norm = 0;
         for (int i = 0; i < (int)I.size(); i++) {
-            Complex d = y_fmm[i] - y_dense[i];
+            Complex d = y_mlfma[i] - y_dense[i];
             mv_diff += std::norm(d);
             mv_norm += std::norm(y_dense[i]);
         }
-        std::cout << "Matvec 相对误差 ||y_fmm - y_dense|| / ||y_dense|| = "
+        std::cout << "Matvec 相对误差 ||y_mlfma - y_dense|| / ||y_dense|| = "
                   << std::sqrt(mv_diff / std::max(mv_norm, 1e-30)) << "\n";
 
         // 比较 RCS
         std::cout << "\nRCS 对比:\n";
-        std::cout << "θ(°) | FMM(dBsm) | Dense(dBsm) | Δ(dB)\n";
+        std::cout << "θ(°) | MLFMA(dBsm) | Dense(dBsm) | Δ(dB)\n";
         std::cout << "----------------------------------------\n";
         for (int i = 0; i <= n_theta; i++) {
             double theta = i * 180.0 / n_theta * PI / 180.0;

@@ -13,7 +13,7 @@ class EFIE;
 
 struct FMMBox {
     int ix, iy, iz;                      //小盒子索引（各方向上第几个）
-    int global_idx;                      //总共来说的小盒子编号
+    int global_idx;                      //总共来说的小盒子编号（从0开始)
     Vertex center;                       // 盒子中心 (世界坐标)
     std::vector<int> basis_idx;          // 盒内基函数编号
     std::vector<int> near_boxes;         // 近场盒子编号列表

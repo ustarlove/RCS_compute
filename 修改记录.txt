@@ -219,3 +219,93 @@ FMM 加速方案实施计划
      3. FMM matvec 精度：对 refinement=0 (~30 未知量) 随机向量 x，||y_fmm - y_dense|| / ||y_dense|| < 1%
      4. 求解结果：FMM 与稠密法的电流系数 I 相对差 < 1%
      5. RCS 曲线：FMM 与稠密法 RCS(dBsm) 在采样角度上差异 < 0.5 dB
+
+
+● 已完成。改动总结：
+
+  cg_solver.h — 新增 solve_gmres_functor 声明，参数含 restart（默认 30）。
+
+  cg_solver.cpp — 实现 restarted GMRES(m)：
+  - Arnoldi 迭代构建 Krylov 子空间的正交基
+  - 复数 Givens 旋转消去 Hessenberg 矩阵次对角线并更新右端项
+  - 残差估计 |g[j+1]| 单调下降（GMRES 理论保证）
+  - 每轮重启前回代求解小上三角系统，更新近似解
+  - Happy breakdown 检测（Krylov 子空间不再增长时提前退出）
+
+  main.cpp — 新增两个参数：
+  - solver_type = "gmres" — 可选 "bicgstab" 或 "gmres"
+  - gmres_restart = 30 — GMRES 重启维度
+
+  测试结果：480 未知量，FMM 加速，GMRES(30) 在 104 次迭代收敛（4 次重启），最终 |r|/|b| ≈ 7.5e-7，RCS 数据正常。
+
+
+══════════════════════════════════════════════════════════
+  【2026-06-17】FMM → MLFMA 改造（双立方插值）
+══════════════════════════════════════════════════════════
+
+  背景
+  ────
+  将原有的单层 FMM (Single-Level FMM) 升级为多层快速多极子算法 (MLFMA)，
+  层级间方向图传递采用双立方 (bicubic) Lagrange 插值。
+
+  核心改动
+  ────────
+  1. 八叉树结构
+     - 替代单层均匀网格，构建多层空间划分
+     - 层 0 (最粗, box=1.2m) → 层 1 (box=0.6m) → 层 2 (最细, box=0.3m)
+     - 自底向上通过中心点坐标建立父子关系
+     - 每层独立计算截断数 L 和角采样方向数 K
+
+  2. 互作用列表 (Interaction List)
+     - 标准 MLFMA 定义: 父层近邻盒子的所有子盒子，排除本层近邻
+     - 最粗层特殊处理: 直接取所有其它非空且非近邻盒子
+     - 最细层使用 child_boxes 时修正为 parent.child_boxes（修复最细层无子层的 bug）
+
+  3. 双立方插值 / 反插值
+     - θ 方向: 4 点 Lagrange 插值在 Gauss-Legendre 非均匀节点
+     - φ 方向: 4 点 Lagrange 插值在均匀周期节点（循环取模）
+     - 插值 (interp_bicubic): 细层 K → 粗层 K（增加角采样）
+     - 反插值 (anterp_bicubic): 粗层 K → 细层 K（减少角采样，插值算子的伴随）
+
+  4. matvec 四阶段流水线
+     阶段 1: 近场 CSR matvec（仅最细层）
+     阶段 2: 上行聚合 — 最细层聚合 → [相位平移 + 双立方插值] → 父层累加 → ... → 最粗层
+     阶段 3: M2L 转移 — 每层互作用列表内对角转移算子 T_L
+     阶段 4: 下行解聚 — 最粗层 → [双立方反插值 + 相位平移] → 子层分发 → ... → 最细层 → 基函数
+
+  新增文件
+  ────────
+  - mlfma.h     — MLFMA 类声明（八叉树层级、LevelData、双立方插值接口）
+  - mlfma.cpp   — MLFMA 完整实现（~780 行）
+
+  修改文件
+  ────────
+  - main.cpp    — FMM → MLFMA（include、变量名、调用接口替换）
+  - Makefile    — SRCS 添加 mlfma.cpp
+
+  保留文件
+  ────────
+  - fmm.h / fmm.cpp             — 原单层 FMM 代码保留，供参考对比
+  - fmm_translator.h / fmm.cpp  — Translator 和 PWSDirection 被 MLFMA 复用
+
+  关键技术细节
+  ────────────
+  - 截断数 L: L ≈ ka + 1.8·(ka)^{1/3}·log10(1/ε)，每层独立计算，上限 20
+  - 方向数 K: K = 2·(L+1)²（Gauss-Legendre θ × 均匀 φ 张量积）
+  - 相位平移: dst[p] = src[p] · exp(j·k₀·k̂_p · (r_old - r_new))
+  - 常数 C = k₀²·η / (16π²)
+
+  运行结果
+  ────────
+  - N = 480 未知量，3 层八叉树
+  - 最细层: 41 非空盒子, K=128, 1190 M2L pairs
+  - 中间层: 8 非空盒子, K=288, 0 M2L pairs (全近邻)
+  - 最粗层: 1 非空盒子, K=578, 0 M2L pairs
+  - GMRES(30) 104 次迭代收敛，|r|/|b| = 7.5e-7
+  - RCS 输出合理
+
+  当前限制
+  ────────
+  - N=480 规模下粗层 M2L 对数为零，多层级优势未体现
+  - 增大 refinement 参数至 3~4（N≈2000~8000）后粗层将产生有效 M2L 互作用
+  - 单层 FMM 代码保留可对比验证

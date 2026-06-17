@@ -1,4 +1,5 @@
 #include "cg_solver.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 
@@ -256,5 +257,202 @@ bool CGSolver::solve_bicgstab_functor(
 
     std::cout << "[FMM-BiCGSTAB] did not converge after " << max_iter
               << " iterations\n";
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// GMRES(m) — 带重启的广义最小残差法，适用于复非对称矩阵
+// 残差范数单调下降（理论最优性），每轮迭代 1 次 matvec
+// ---------------------------------------------------------------------------
+bool CGSolver::solve_gmres_functor(
+    const std::function<void(const std::vector<Complex>&,
+                              std::vector<Complex>&)>& matvec,
+    const std::vector<Complex>& b,
+    std::vector<Complex>& x,
+    double tol,
+    int max_iter,
+    int restart) {
+    int n = (int)b.size();
+    x.assign(n, Complex(0, 0));
+
+    auto dotc = [&](const std::vector<Complex>& a, const std::vector<Complex>& b_vec) {
+        Complex s(0, 0);
+        for (int i = 0; i < n; i++) s += std::conj(a[i]) * b_vec[i];
+        return s;
+    };
+
+    double bnorm = 0;
+    for (int i = 0; i < n; i++) bnorm += std::norm(b[i]);
+    bnorm = std::sqrt(bnorm);
+    if (bnorm < 1e-30) { std::cout << "[GMRES] zero RHS\n"; return true; }
+    double stop_tol = tol * bnorm;
+
+    int m = std::min(restart, max_iter);
+    // Hessenberg 矩阵 H (m+1)×m
+    std::vector<std::vector<Complex>> H(m + 1, std::vector<Complex>(m, Complex(0, 0)));
+    // Givens 旋转参数: (c_real, s_complex) × m
+    std::vector<double> c_giv(m, 0.0);
+    std::vector<Complex> s_giv(m, Complex(0, 0));
+    // 右端项 g (长度 m+1)
+    std::vector<Complex> g(m + 1, Complex(0, 0));
+    // Krylov 基 V (最多 m+1 个向量)
+    std::vector<std::vector<Complex>> V;
+
+    std::vector<Complex> r(n), w(n);
+    std::vector<Complex> Av(n);  // 用于最终残差验证
+
+    int total_iter = 0;
+
+    for (int outer = 0; outer < max_iter; outer += m) {
+        // 计算当前残差 r = b - A*x
+        if (outer == 0) {
+            r = b;
+        } else {
+            matvec(x, Av);
+            for (int i = 0; i < n; i++) r[i] = b[i] - Av[i];
+        }
+
+        double beta = 0;
+        for (int i = 0; i < n; i++) beta += std::norm(r[i]);
+        beta = std::sqrt(beta);
+
+        if (beta < stop_tol) {
+            std::cout << "[GMRES] converged after " << total_iter
+                      << " iterations, |r|/|b| = " << beta / bnorm << "\n";
+            return true;
+        }
+
+        int inner = std::min(m, max_iter - outer);
+        V.assign(inner + 1, std::vector<Complex>());
+
+        // v1 = r / β
+        V[0].resize(n);
+        for (int i = 0; i < n; i++) V[0][i] = r[i] / beta;
+
+        // 重置 H 和 g
+        for (int i = 0; i <= inner; i++) {
+            for (int j = 0; j < inner; j++) H[i][j] = Complex(0, 0);
+            g[i] = Complex(0, 0);
+        }
+        g[0] = Complex(beta, 0);
+
+        int j;
+        for (j = 0; j < inner; j++) {
+            // w = A * v_j
+            matvec(V[j], w);
+
+            // Arnoldi: Gram-Schmidt 正交化
+            for (int i = 0; i <= j; i++) {
+                H[i][j] = dotc(V[i], w);
+                for (int k = 0; k < n; k++)
+                    w[k] -= H[i][j] * V[i][k];
+            }
+
+            double h_next = 0;
+            for (int i = 0; i < n; i++) h_next += std::norm(w[i]);
+            h_next = std::sqrt(h_next);
+
+            H[j + 1][j] = Complex(h_next, 0);
+
+            if (h_next < 1e-30) {
+                // Happy breakdown: 解已在当前子空间内
+                inner = j + 1;
+                break;
+            }
+
+            V[j + 1].resize(n);
+            for (int i = 0; i < n; i++) V[j + 1][i] = w[i] / h_next;
+
+            // 对 H 的第 j 列施加之前所有的 Givens 旋转
+            for (int i = 0; i < j; i++) {
+                Complex a = H[i][j];
+                Complex b_val = H[i + 1][j];
+                H[i][j]     = c_giv[i] * a + s_giv[i] * b_val;
+                H[i + 1][j] = -std::conj(s_giv[i]) * a + c_giv[i] * b_val;
+            }
+
+            // 计算新的 Givens 旋转，消去 H[j+1][j]
+            {
+                Complex a = H[j][j];
+                Complex b_val = H[j + 1][j];
+
+                double a_abs = std::abs(a);
+                double b_abs = std::abs(b_val);
+                double r_raw = std::sqrt(a_abs * a_abs + b_abs * b_abs);
+
+                if (r_raw < 1e-30) {
+                    c_giv[j] = 1.0;
+                    s_giv[j] = Complex(0, 0);
+                } else {
+                    c_giv[j] = a_abs / r_raw;
+                    if (a_abs > 1e-30) {
+                        Complex phase_a = a / a_abs;  // a / |a|
+                        s_giv[j] = phase_a * std::conj(b_val) / r_raw;
+                    } else {
+                        s_giv[j] = std::conj(b_val) / r_raw;
+                    }
+                }
+
+                // 施加新旋转到 H
+                H[j][j]     = c_giv[j] * a + s_giv[j] * b_val;
+                H[j + 1][j] = Complex(0, 0);
+
+                // 施加新旋转到 g
+                Complex g_old = g[j];
+                g[j]     = c_giv[j] * g_old + s_giv[j] * g[j + 1];
+                g[j + 1] = -std::conj(s_giv[j]) * g_old + c_giv[j] * g[j + 1];
+            }
+
+            double resid = std::abs(g[j + 1]);
+            total_iter++;
+
+            if (resid < stop_tol) {
+                inner = j + 1;
+                break;
+            }
+        }
+
+        // 回代求解 y: H[0:inner-1][0:inner-1] * y = g[0:inner-1]
+        // H 已经通过 Givens 旋转化为上三角阵
+        std::vector<Complex> y(inner, Complex(0, 0));
+        for (int i = inner - 1; i >= 0; i--) {
+            Complex sum = g[i];
+            for (int k = i + 1; k < inner; k++)
+                sum -= H[i][k] * y[k];
+            if (std::abs(H[i][i]) > 1e-30)
+                y[i] = sum / H[i][i];
+            else
+                y[i] = Complex(0, 0);
+        }
+
+        // x = x + V[:, 0:inner-1] * y
+        for (int k = 0; k < inner; k++) {
+            for (int i = 0; i < n; i++) {
+                x[i] += V[k][i] * y[k];
+            }
+        }
+
+        // 检查是否收敛
+        if (std::abs(g[inner]) < stop_tol) {
+            std::cout << "[GMRES] converged after " << total_iter
+                      << " iterations, |r|/|b| = " << std::abs(g[inner]) / bnorm << "\n";
+            return true;
+        }
+
+        // 准备下一轮重启 (r 会在下次循环开头重算)
+        std::cout << "[GMRES] restart at iter " << total_iter
+                  << ", residual = " << std::abs(g[inner]) / bnorm << "\n";
+    }
+
+    // 最终残差
+    matvec(x, Av);
+    double final_res = 0;
+    for (int i = 0; i < n; i++) {
+        Complex diff = b[i] - Av[i];
+        final_res += std::norm(diff);
+    }
+    std::cout << "[GMRES] did not converge after " << total_iter
+              << " iterations, final |r|/|b| = "
+              << std::sqrt(final_res) / bnorm << "\n";
     return false;
 }

@@ -4,7 +4,7 @@ LDFLAGS = -lm
 
 TARGET = sphere_rcs
 SRCS = main.cpp mesh.cpp rwg.cpp efie.cpp cg_solver.cpp farfield.cpp \
-       fmm.cpp fmm_translator.cpp
+       fmm.cpp fmm_translator.cpp mlfma.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(TARGET)

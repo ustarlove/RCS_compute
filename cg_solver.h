@@ -29,6 +29,16 @@ public:
         std::vector<Complex>& x,
         double tol = 1e-6,
         int max_iter = 1000);
+
+    // FMM 加速版 GMRES(m): restarted GMRES，残差单调下降
+    static bool solve_gmres_functor(
+        const std::function<void(const std::vector<Complex>& x,
+                                  std::vector<Complex>& y)>& matvec,
+        const std::vector<Complex>& b,
+        std::vector<Complex>& x,
+        double tol = 1e-6,
+        int max_iter = 1000,
+        int restart = 30);
 };
 
 #endif // CG_SOLVER_H
